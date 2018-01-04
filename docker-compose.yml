@@ -1,0 +1,10 @@
+version: '2'
+
+services:
+    app:
+        build: ./app
+        image: sealemar/loveread-ec-parser:latest
+
+        volumes:
+            - ./app/src:/usr/src/app/src:ro
+            - ./app/output:/usr/src/app/output
