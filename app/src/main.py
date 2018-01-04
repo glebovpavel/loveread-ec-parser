@@ -7,9 +7,15 @@ import random
 import time
 import html
 
+from ebooklib import epub
+
 logger = logging.getLogger("app")
 
 OUTPUT_DIR = '/usr/src/app/output'
+
+URL_PREFIX = 'http://loveread.ec'
+READ_BOOK_ENDPOINT = '/read_book.php'
+BOOK_COVER_ENDPOINT = '/view_global.php'
 
 CONTENT_START_MARKER = '<div class="MsoNormal"'
 CONTENT_END_MARKER = '<div style="text-align: right; font-size: 0.8em;'
@@ -27,10 +33,44 @@ RE_MULTISPACE = re.compile(r'\s+')
 RE_NAVIGATION = re.compile(r"<div class='navigation'.+?>(.+?)</div>")
 RE_NAVIGATION_A = re.compile(r'<a href=.+?>(\d+)</a>')
 
+class BookCover():
+    def __init__(self, bookId, author, title, description, imgFileName):
+        self.bookId = bookId
+        self.author = author
+        self.title  = title
+        self.description = description
+        self.imgFileName = imgFileName
+
+    @staticmethod
+    def parseBookCover(url, bookId):
+        content = fetchData(url)
+        content = RE_MULTISPACE.sub(' ', content)
+        meta    = re.search(r'<td.+?class="span_str".*?>(.+?)</td>', content)[1]
+        imgUrl  = "%s/%s" % (URL_PREFIX, re.search(r'<img.+?src="(.+?)"', meta)[1])
+        imgFileName = '%s/%s.%s' % (OUTPUT_DIR, bookId, imgUrl[imgUrl.rindex(".") + 1 : ])
+        urllib.request.urlretrieve(imgUrl, imgFileName)
+        reg = re.compile(r"(?:<a.+?)?<strong>(.+?)</strong>(?:.*?</a>)?")
+        metaList = [
+            (k, reg.sub(r"\1", v).strip()) for k, v in
+            re.findall(r"<span>(.+?)</span>(.+?)<br>", meta)
+        ]
+        author = next(( v for k, v in metaList if k == 'Автор: ' ), "N/A")
+        title  = next(( v for k, v in metaList if k == 'Название: ' ), "N/A")
+        metaStr = "<p>%s</p>" % "<br />".join([ "%s%s" % (k, v) for k, v in metaList ])
+        description = "%s<p>%s</p>" % (
+            metaStr,
+            re.search(r'<p class="span_str">(.+?)(?:\s*В нашей библиотеке вы.+?)?</p>', content)[1]
+        )
+
+        return BookCover(bookId, author, title, description, imgFileName)
+
+
 def parseContent(data):
     content = data [ data.index(CONTENT_START_MARKER) : ]
     content = content [ : content.index(CONTENT_END_MARKER) ]
     content = content [ content.index('<p class="MsoNormal"') : ]
+
+    content = RE_MULTISPACE.sub(' ', content)
 
     content = RE_CHAPTER_A.sub('', content)
     content = RE_CHAPTER.sub(r'<h\1>\2</h\1>', content)
@@ -40,9 +80,6 @@ def parseContent(data):
     content = RE_P_CLASS.sub(r'<p>', content)
 
     content = RE_IMG.sub('', content)
-
-    content = RE_MULTISPACE.sub(' ', content)
-
     #content = html.unescape(content)
 
     return content
@@ -71,76 +108,100 @@ def fetchData(url):
 
 
 def parseBook(url):
+    if not url.startswith(URL_PREFIX):
+        raise ValueError('Only URL_PREFIX="%s" is supported. Current url is "%s"' % (URL_PREFIX, url))
+
     scheme, netloc, path, qs, fragment = urlsplit(url)
     qsd = parse_qs(qs)
     firstPage = int(qsd.get('p', ['1'])[0])
     bookId = int(qsd['id'][0])
-    url = urlunsplit((
+
+    makeUrl = lambda endpoint: urlunsplit((
         scheme,
         netloc,
-        path,
+        endpoint,
         "&".join([ "%s=%s" % (k, v1) for k, v in qsd.items() if k != 'p' for v1 in v ]),
         fragment
     ))
 
+    readBookUrl = makeUrl(READ_BOOK_ENDPOINT)
+    bookCoverUrl = makeUrl(BOOK_COVER_ENDPOINT)
+
+    if path != READ_BOOK_ENDPOINT and path != BOOK_COVER_ENDPOINT:
+        raise ValueError('Unknown endpoint in url = "%s"' % url)
+
+    cover = BookCover.parseBookCover(bookCoverUrl, bookId)
+    fname = parseBookContent(readBookUrl, bookId, firstPage)
+    return (cover, fname)
+
+
+def parseBookContent(url, bookId, firstPage):
     logger.info("Starting to parse bookId = %d from page #%d", bookId, firstPage)
 
     data = fetchData(url)
     content = parseContent(data)
+    pageCount = int( RE_NAVIGATION_A.findall(RE_NAVIGATION.findall(data)[0])[-1] )
+    fname = '%s/%s.html' % (OUTPUT_DIR, bookId)
 
-    with open(
-        '%s/%s.html' % (OUTPUT_DIR, bookId),
-        'w' if firstPage == 1 else 'a'
-    ) as fd:
+    if firstPage > pageCount:
+        logger.info("firstPage > pageCount : %d > %d", firstPage, pageCount)
+        return fname
+
+    with open(fname, 'w' if firstPage == 1 else 'a') as fd:
         fd.write(content)
 
-    pageCount = int( RE_NAVIGATION_A.findall(RE_NAVIGATION.findall(data)[0])[-1] )
     for page in range(firstPage + 1, pageCount + 1):
         pageUrl = "%s&p=%d" % (url, page)
         content = parsePage(pageUrl)
 
-        with open('%s/%s.html' % (OUTPUT_DIR, bookId), 'a') as fd:
+        with open(fname, 'a') as fd:
             fd.write(content)
 
         seconds = random.randint(10, 30)
         logger.info("Parsed page #%d of %d at %s. Sleeping for %d seconds", page, pageCount, pageUrl, seconds)
         time.sleep(seconds)
 
+    return fname
 
-def splitByChapters(fname):
-    with open('%s/%s' % (OUTPUT_DIR, fname), 'r') as fd:
+
+def createEpub(bookCover, htmlBookFileName):
+    with open(htmlBookFileName, 'r') as fd:
         content = fd.read()
-
-    from ebooklib import epub
 
     book = epub.EpubBook()
 
 # set metadata
-    book.set_identifier('id24380')
-    book.set_title('Большая Пайка')
+    book.set_identifier('id%d' % bookCover.bookId)
+    book.set_title(bookCover.title)
     book.set_language('ru')
 
-    book.add_author('Юлий Дубов')
+    book.add_author(bookCover.author)
 
-#     import os
-#     os.makedirs('%s/%s' % (OUTPUT_DIR, fname[ : fname.rindex('.html')]), exist_ok = True)
+    book.set_cover("cover.jpg", open(bookCover.imgFileName, 'rb').read())
 
     reChapter = re.compile(r'<h1>(.+?)</h1>')
     chs = [ c for c in reChapter.finditer(content) ]
 
-    chapters = [
-        epub.EpubHtml(
-            title=title,
-            file_name='chapter_%d.xhtml' % i,
+    reTitle = re.compile(r'<(?P<tag>[\w\d]+).*?>(?:.*?</\s*(?P=tag)>)?')
+
+    chapters = [ epub.EpubHtml(
+            title='Описание',
+            file_name='description.xhtml',
             lang='ru',
-            content = "<h1>%s</h1>%s" % (title, content[start: end])
-        ) for i, start, end, title in zip(
-            range(0, len(chs) + 1),
-            [0] + [ c.end() for c in chs ],
-            [ c.start() for c in chs ] + [ len(content) ],
-            ["Введение"] + [ ch.groups()[0] for ch in chs ]
-        )
-    ]
+            content = "<h1>Описание</h1>%s" % (bookCover.description)
+        ) ] + [
+            epub.EpubHtml(
+                title=title,
+                file_name='chapter_%d.xhtml' % i,
+                lang='ru',
+                content = "<h1>%s</h1>%s" % (title, content[start: end])
+            ) for i, start, end, title in zip(
+                range(0, len(chs) + 1),
+                [0] + [ c.end() for c in chs ],
+                [ c.start() for c in chs ] + [ len(content) ],
+                ["Введение"] + [ RE_MULTISPACE.sub(' ', reTitle.sub(' - ', ch.groups()[0])) for ch in chs ]
+            )
+        ]
 
     # add chapters
     for chapter in chapters:
@@ -164,7 +225,7 @@ def splitByChapters(fname):
     book.spine = ['nav'] + chapters
 
 # write to the file
-    epub.write_epub('%s/%s.epub' % (OUTPUT_DIR, fname), book, {})
+    epub.write_epub('%s/%s.epub' % (OUTPUT_DIR, bookCover.bookId), book, {})
 
 
 def main():
@@ -176,9 +237,10 @@ def main():
     logger.setLevel(logging.DEBUG)
     logger.info("started")
 
-    #parseBook(sys.argv[1])
+    url = sys.argv[1]
 
-    splitByChapters('24380.full.html')
+    cover, htmlBookFileName = parseBook(url)
+    createEpub(cover, htmlBookFileName)
 
     logger.info("finished")
 
