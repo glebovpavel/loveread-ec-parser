@@ -7,6 +7,7 @@ import random
 import time
 import html
 
+from ebooklib.plugins.booktype import BooktypeFootnotes
 from ebooklib import epub
 
 logger = logging.getLogger("app")
@@ -26,12 +27,32 @@ RE_CHAPTER = re.compile(r'<div class="take_h(\d+)">(.+?)</div>')
 RE_P_EM = re.compile(r'<p class=em>(.+?)</p>')
 RE_P_CLASS = re.compile(r'<p class=.+?>')
 
+# Example:
+# <a href="notes.php?id=24380#30" target="_blank" title=" Извините, мы закрываемся. Вы хотите что-нибудь из этого? (англ.) ">[30]</a>
+RE_NOTE = re.compile(r'<a.+?title="(.+?)".*?>.*?(\d+).*?</a>')
+
 RE_IMG = re.compile(r'<img.+?>')
 
 RE_MULTISPACE = re.compile(r'\s+')
 
 RE_NAVIGATION = re.compile(r"<div class='navigation'.+?>(.+?)</div>")
 RE_NAVIGATION_A = re.compile(r'<a href=.+?>(\d+)</a>')
+
+FOOTNOTES = []
+class Footnote:
+    def __init__(self, footnoteId, note):
+        self.footnoteId = footnoteId
+        self.note = note
+
+
+def footnotesRepl(matchobj):
+
+    # <span id="InsertNoteID_1_marker1" class="InsertNoteMarker"><sup><a href="#InsertNoteID_1">1</a></sup><span>
+    # <ol id="InsertNote_NoteList"><li id="InsertNoteID_1">prvi footnote <span id="InsertNoteID_1_LinkBacks"><sup><a href="#InsertNoteID_1_marker1">^</a></sup></span></li>
+
+    FOOTNOTES.append(Footnote(matchobj.group(2), matchobj.group(1)))
+    return '<span id="InsertNoteID_{fid}_marker1" class="InsertNoteMarker"><sup><a href="#InsertNoteID_{fid}">{matchedId}</a></sup><span>'.format(fid = matchobj.group(2), matchedId = matchobj.group(2))
+
 
 class BookCover():
     def __init__(self, bookId, author, title, description, imgFileName):
@@ -80,6 +101,7 @@ def parseContent(data):
     content = RE_P_CLASS.sub(r'<p>', content)
 
     content = RE_IMG.sub('', content)
+
     #content = html.unescape(content)
 
     return content
@@ -184,17 +206,28 @@ def createEpub(bookCover, htmlBookFileName):
 
     reTitle = re.compile(r'<(?P<tag>[\w\d]+).*?>(?:.*?</\s*(?P=tag)>)?')
 
+    def addFootnotes(chapterContent):
+        start = len(FOOTNOTES)
+        chapterContent = RE_NOTE.sub(footnotesRepl, chapterContent)
+        footnotes = FOOTNOTES[start:]
+        if len(footnotes) > 0:
+            chapterContent = '%s <ol id="InsertNote_NoteList">%s' % (
+                chapterContent,
+                "".join([ '<li id="InsertNoteID_{fid}">{note}<span id="InsertNoteID_{fid}_LinkBacks"><sup><a href="#InsertNoteID_{fid}_marker1">^</a></sup></span></li>'.format(fid = f.footnoteId, note = f.note) for f in footnotes ])
+            )
+        return chapterContent
+
     chapters = [ epub.EpubHtml(
             title='Описание',
             file_name='description.xhtml',
             lang='ru',
-            content = "<h1>Описание</h1>%s" % (bookCover.description)
+            content = "<h1>Описание</h1>%s" % bookCover.description
         ) ] + [
             epub.EpubHtml(
                 title=title,
                 file_name='chapter_%d.xhtml' % i,
                 lang='ru',
-                content = "<h1>%s</h1>%s" % (title, content[start: end])
+                content = "<h1>%s</h1>%s" % (title, addFootnotes(content[start: end]))
             ) for i, start, end, title in zip(
                 range(0, len(chs) + 1),
                 [0] + [ c.end() for c in chs ],
@@ -202,6 +235,7 @@ def createEpub(bookCover, htmlBookFileName):
                 ["Введение"] + [ RE_MULTISPACE.sub(' ', reTitle.sub(' - ', ch.groups()[0])) for ch in chs ]
             )
         ]
+    #import pdb ; pdb.set_trace()
 
     # add chapters
     for chapter in chapters:
@@ -225,7 +259,7 @@ def createEpub(bookCover, htmlBookFileName):
     book.spine = ['nav'] + chapters
 
 # write to the file
-    epub.write_epub('%s/%s.epub' % (OUTPUT_DIR, bookCover.bookId), book, {})
+    epub.write_epub('%s/%s.epub' % (OUTPUT_DIR, bookCover.bookId), book, {'plugins' : [ BooktypeFootnotes(book) ]})
 
 
 def main():

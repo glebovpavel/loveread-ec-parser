@@ -1,1 +1,1 @@
-ebooklib
+git+git://github.com/sealemar/ebooklib@master#egg=ebooklib
