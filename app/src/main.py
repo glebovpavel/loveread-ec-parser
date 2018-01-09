@@ -213,7 +213,7 @@ def createEpub(bookCover, htmlBookFileName):
         if len(footnotes) > 0:
             chapterContent = '%s <ol id="InsertNote_NoteList">%s' % (
                 chapterContent,
-                "".join([ '<li id="InsertNoteID_{fid}">{note}<span id="InsertNoteID_{fid}_LinkBacks"><sup><a href="#InsertNoteID_{fid}_marker1">^</a></sup></span></li>'.format(fid = f.footnoteId, note = f.note) for f in footnotes ])
+                "".join([ '<li id="InsertNoteID_{fid}">{fid} - {note}<span id="InsertNoteID_{fid}_LinkBacks"><sup><a href="#InsertNoteID_{fid}_marker1">^</a></sup></span></li>'.format(fid = f.footnoteId, note = f.note) for f in footnotes ])
             )
         return chapterContent
 
@@ -235,7 +235,6 @@ def createEpub(bookCover, htmlBookFileName):
                 ["Введение"] + [ RE_MULTISPACE.sub(' ', reTitle.sub(' - ', ch.groups()[0])) for ch in chs ]
             )
         ]
-    #import pdb ; pdb.set_trace()
 
     # add chapters
     for chapter in chapters:
