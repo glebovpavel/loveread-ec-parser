@@ -3,6 +3,7 @@ import sys
 import urllib.request
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 import re
+import os.path as op
 import random
 import time
 import html
@@ -55,21 +56,19 @@ def footnotesRepl(matchobj):
 
 
 class BookCover():
-    def __init__(self, bookId, author, title, description, imgFileName):
+    def __init__(self, bookId, author, title, description, imgFileName, filename):
         self.bookId = bookId
         self.author = author
         self.title  = title
         self.description = description
         self.imgFileName = imgFileName
+        self.filename = filename
 
     @staticmethod
     def parseBookCover(url, bookId):
         content = fetchData(url)
         content = RE_MULTISPACE.sub(' ', content)
         meta    = re.search(r'<td.+?class="span_str".*?>(.+?)</td>', content)[1]
-        imgUrl  = "%s/%s" % (URL_PREFIX, re.search(r'<img.+?src="(.+?)"', meta)[1])
-        imgFileName = '%s/%s.%s' % (OUTPUT_DIR, bookId, imgUrl[imgUrl.rindex(".") + 1 : ])
-        urllib.request.urlretrieve(imgUrl, imgFileName)
         reg = re.compile(r"(?:<a.+?)?<strong>(.+?)</strong>(?:.*?</a>)?")
         metaList = [
             (k, reg.sub(r"\1", v).strip()) for k, v in
@@ -83,7 +82,15 @@ class BookCover():
             re.search(r'<p class="span_str">(.+?)(?:\s*В нашей библиотеке вы.+?)?</p>', content)[1]
         )
 
-        return BookCover(bookId, author, title, description, imgFileName)
+        wordify = lambda s: RE_MULTISPACE.sub(' ', re.sub(r'\W', ' ', s)).strip()
+        filename = '%s - %s' % (wordify(author), wordify(title))
+
+        # get the book cover image
+        imgUrl = "%s/%s" % (URL_PREFIX, re.search(r'<img.+?src="(.+?)"', meta)[1])
+        imgFileName = '%s/%s.%s' % (OUTPUT_DIR, filename, imgUrl[imgUrl.rindex(".") + 1 : ])
+        urllib.request.urlretrieve(imgUrl, imgFileName)
+
+        return BookCover(bookId, author, title, description, imgFileName, filename)
 
 
 def parseContent(data):
@@ -153,17 +160,18 @@ def parseBook(url):
         raise ValueError('Unknown endpoint in url = "%s"' % url)
 
     cover = BookCover.parseBookCover(bookCoverUrl, bookId)
-    fname = parseBookContent(readBookUrl, bookId, firstPage)
+    fname = parseBookContent(readBookUrl, bookId, cover, firstPage)
     return (cover, fname)
 
 
-def parseBookContent(url, bookId, firstPage):
-    logger.info("Starting to parse bookId = %d from page #%d", bookId, firstPage)
+def parseBookContent(url, bookId, cover, firstPage):
+    logger.info("Starting to parse bookId = %d, author = '%s', title = '%s' from page #%d",
+        bookId, cover.author, cover.title, firstPage)
 
     data = fetchData(url)
     content = parseContent(data)
     pageCount = int( RE_NAVIGATION_A.findall(RE_NAVIGATION.findall(data)[0])[-1] )
-    fname = '%s/%s.html' % (OUTPUT_DIR, bookId)
+    fname = '%s/%s.html' % (OUTPUT_DIR, cover.filename)
 
     if firstPage > pageCount:
         logger.info("firstPage > pageCount : %d > %d", firstPage, pageCount)
@@ -258,7 +266,10 @@ def createEpub(bookCover, htmlBookFileName):
     book.spine = ['nav'] + chapters
 
 # write to the file
-    epub.write_epub('%s/%s.epub' % (OUTPUT_DIR, bookCover.bookId), book, {'plugins' : [ BooktypeFootnotes(book) ]})
+    fname = '%s/%s.epub' % (OUTPUT_DIR, bookCover.filename)
+    epub.write_epub(fname, book, {'plugins' : [ BooktypeFootnotes(book) ]})
+
+    return fname
 
 
 def main():
@@ -273,9 +284,9 @@ def main():
     url = sys.argv[1]
 
     cover, htmlBookFileName = parseBook(url)
-    createEpub(cover, htmlBookFileName)
+    epubFileName = createEpub(cover, htmlBookFileName)
 
-    logger.info("finished")
+    logger.info("finished parsing %s, %s", htmlBookFileName, epubFileName)
 
 
 if __name__ == '__main__':
